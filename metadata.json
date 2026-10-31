@@ -1,0 +1,6 @@
+{
+  "name": "AO3 Reading Companion",
+  "description": "Private fanfiction reading companion app for works hosted on Archive of Our Own (AO3)",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
