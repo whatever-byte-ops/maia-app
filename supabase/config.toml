@@ -1,0 +1,2 @@
+[functions.import-work]
+verify_jwt = true
