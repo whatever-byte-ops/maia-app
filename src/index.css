@@ -53,6 +53,11 @@
   --text-secondary: #C8BEC8;
   --border-color: #38323B;
   --highlight-bg: #2C222B;
+  --highlight-pink: #e8a9c2;
+  --highlight-blue: #9dc5f2;
+  --highlight-yellow: #f2d879;
+  --highlight-green: #a9d8a1;
+  --highlight-purple: #c6a9e8;
   --priority-badge-bg: #30222A;
   --priority-badge-border: #614253;
   --priority-badge-text: #E8B8CE;
@@ -69,6 +74,11 @@
   --text-secondary: #C1CAD8;
   --border-color: #263040;
   --highlight-bg: #1B2433;
+  --highlight-pink: #e8a9c2;
+  --highlight-blue: #9dc5f2;
+  --highlight-yellow: #f2d879;
+  --highlight-green: #a9d8a1;
+  --highlight-purple: #c6a9e8;
   --priority-badge-bg: #182436;
   --priority-badge-border: #3B5278;
   --priority-badge-text: #b3d1f5;
@@ -85,6 +95,11 @@
   --text-secondary: #62575E;
   --border-color: #D9D2CC;
   --highlight-bg: #F0E5EB;
+  --highlight-pink: #e8a9c2;
+  --highlight-blue: #9dc5f2;
+  --highlight-yellow: #f2d879;
+  --highlight-green: #a9d8a1;
+  --highlight-purple: #c6a9e8;
   --priority-badge-bg: #fae8ef;
   --priority-badge-border: #e0b4c7;
   --priority-badge-text: #9e4b6d;
@@ -101,6 +116,11 @@
   --text-secondary: #D7CABC;
   --border-color: #4A403C;
   --highlight-bg: #3D3330;
+  --highlight-pink: #e8a9c2;
+  --highlight-blue: #9dc5f2;
+  --highlight-yellow: #f2d879;
+  --highlight-green: #a9d8a1;
+  --highlight-purple: #c6a9e8;
   --priority-badge-bg: #3B2E2B;
   --priority-badge-border: #6B524B;
   --priority-badge-text: #e6d3c3;

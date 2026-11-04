@@ -44,6 +44,10 @@ export interface Work {
   currentChapterId: string;
   currentParagraphIndex: number;
   readingProgress: number; // 0 to 100
+  ttsChapterId?: string;
+  ttsParagraphIndex?: number;
+  ttsCharacterIndex?: number;
+  ttsRate?: number;
   chapters: Chapter[];
 }
 
@@ -54,6 +58,9 @@ export interface Annotation {
   chapterId: string;
   chapterTitle: string;
   selectedText: string;
+  paragraphIndex?: number;
+  startOffset?: number;
+  endOffset?: number;
   excerptContext?: string;
   highlightColor: 'pink' | 'blue' | 'yellow' | 'green' | 'purple';
   note: string;

@@ -192,7 +192,7 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
                     <option value="Merriweather">Merriweather (Classic Serif)</option>
                     <option value="Georgia">Georgia (Traditional Screen Serif)</option>
                     <option value="Inter">Inter (Clean Sans-Serif)</option>
-                    <option value="OpenDyslexic">OpenDyslexic (if installed; otherwise system sans-serif)</option>
+                    <option value="OpenDyslexic">OpenDyslexic (accessibility font)</option>
                   </select>
                 </div>
 

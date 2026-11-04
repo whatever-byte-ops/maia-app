@@ -1,0 +1,17 @@
+# Local dependencies and build output
+node_modules/
+dist/
+android/.gradle/
+android/build/
+android/app/build/
+
+# IDE and operating-system files
+.DS_Store
+.idea/
+*.iml
+
+# Local Android configuration and signing material
+android/local.properties
+android/*.jks
+android/*.keystore
+android/keystore.properties

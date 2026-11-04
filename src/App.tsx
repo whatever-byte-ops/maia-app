@@ -174,6 +174,28 @@ export default function App() {
     );
   };
 
+  const handleUpdateTtsPosition = (
+    workId: string,
+    chapterId: string,
+    paragraphIndex: number,
+    characterIndex: number,
+    rate: number
+  ) => {
+    setWorks((prev) =>
+      prev.map((w) =>
+        w.id === workId
+          ? {
+              ...w,
+              ttsChapterId: chapterId,
+              ttsParagraphIndex: paragraphIndex,
+              ttsCharacterIndex: characterIndex,
+              ttsRate: rate
+            }
+          : w
+      )
+    );
+  };
+
   const handleSyncNow = async () => {
     setSyncing(true);
     setSyncError('');
@@ -300,9 +322,11 @@ export default function App() {
       {readingWork && (
         <ReaderView
           work={readingWork}
+          annotations={annotations}
           readerSettings={readerSettings}
           onClose={() => setReadingWork(null)}
           onUpdateProgress={handleUpdateProgress}
+          onUpdateTtsPosition={handleUpdateTtsPosition}
           onAddAnnotation={handleAddAnnotation}
           onUpdateSettings={setReaderSettings}
         />

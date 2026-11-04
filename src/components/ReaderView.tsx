@@ -2,9 +2,38 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Capacitor, type PluginListenerHandle } from '@capacitor/core';
 import { QueueStrategy, TextToSpeech } from '@capacitor-community/text-to-speech';
 import { Work, ReaderSettings, Annotation } from '../types';
-import { ArrowLeft, ChevronLeft, ChevronRight, Menu, Settings as SettingsIcon, Volume2, Play, Pause, Square, Bookmark, Globe, MessageSquare, ThumbsUp, X, Check, Highlighter, Plus } from 'lucide-react';
+import { ArrowLeft, ChevronLeft, ChevronRight, Menu, Settings as SettingsIcon, Volume2, Play, Pause, Square, Bookmark, Globe, MessageSquare, ThumbsUp, X, Check, Highlighter, Plus, Minus, Timer } from 'lucide-react';
+import { franc } from 'franc';
+import { iso6393To1 } from 'iso-639-3';
 
 const MAX_NATIVE_SPEECH_CHUNK_LENGTH = 3500;
+const MIN_AUDIO_RATE = 0.5;
+const MAX_AUDIO_RATE = 3;
+const AUDIO_RATE_STEP = 0.05;
+
+const normalizeAudioRate = (rate: number) => Math.min(
+  MAX_AUDIO_RATE,
+  Math.max(MIN_AUDIO_RATE, Math.round(rate / AUDIO_RATE_STEP) * AUDIO_RATE_STEP)
+);
+
+const formatAudioRate = (rate: number) => rate.toFixed(2).replace(/\.?0+$/, '');
+
+const formatAudioTime = (seconds: number) => {
+  const totalSeconds = Math.max(0, Math.round(seconds));
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor(totalSeconds / 60);
+  const remainingSeconds = totalSeconds % 60;
+  if (hours > 0) {
+    const remainingMinutes = minutes % 60;
+    return `${hours}:${remainingMinutes.toString().padStart(2, '0')}:${remainingSeconds.toString().padStart(2, '0')}`;
+  }
+  return `${minutes}:${remainingSeconds.toString().padStart(2, '0')}`;
+};
+
+const estimateSpeechDuration = (text: string, rate: number) => {
+  const wordCount = text.trim() ? text.trim().split(/\s+/).length : 0;
+  return Math.max(1, Math.ceil((wordCount / (150 * rate)) * 60));
+};
 
 const splitNativeSpeechText = (text: string) => {
   const chunks: { text: string; start: number }[] = [];
@@ -24,44 +53,84 @@ const splitNativeSpeechText = (text: string) => {
   return chunks;
 };
 
-const selectNativeSpeechLanguage = (requestedLanguage: string, supportedLanguages: string[]) => {
-  const normalize = (language: string) => language.replaceAll('_', '-').toLowerCase();
+const detectTextLanguage = (text: string): string | null => {
+  const sample = text
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 5000);
+
+  if (sample.length < 100) return null;
+
+  const detected = franc(sample, { minLength: 100 });
+
+  if (detected === 'und') return null;
+
+  return iso6393To1[detected] ?? detected;
+};
+
+const selectNativeSpeechLanguage = (
+  requestedLanguage: string,
+  supportedLanguages: string[]
+): string | null => {
+  const normalize = (language: string) =>
+    language.replace(/_/g, '-').toLowerCase();
+
   const requested = normalize(requestedLanguage);
-  const exactMatch = supportedLanguages.find((language) => normalize(language) === requested);
-  if (exactMatch) return exactMatch;
   const requestedBase = requested.split('-')[0];
-  const sameLanguage = supportedLanguages.find((language) => normalize(language).split('-')[0] === requestedBase);
+
+  const exactMatch = supportedLanguages.find(
+    (language) => normalize(language) === requested
+  );
+
+  if (exactMatch) return exactMatch;
+
+  const sameLanguage = supportedLanguages.find(
+    (language) => normalize(language).split('-')[0] === requestedBase
+  );
+
   if (sameLanguage) return sameLanguage;
-  const english = supportedLanguages.find((language) => normalize(language).split('-')[0] === 'en');
-  return english ?? supportedLanguages[0] ?? null;
+
+  return null;
 };
 
 interface ReaderViewProps {
   work: Work;
+  annotations: Annotation[];
   readerSettings: ReaderSettings;
   onClose: () => void;
   onUpdateProgress: (workId: string, chapterId: string, paragraphIndex: number, progress: number) => void;
+  onUpdateTtsPosition: (workId: string, chapterId: string, paragraphIndex: number, characterIndex: number, rate: number) => void;
   onAddAnnotation: (annotation: Omit<Annotation, 'id' | 'createdAt'>) => void;
   onUpdateSettings: (settings: ReaderSettings) => void;
 }
 
 export const ReaderView: React.FC<ReaderViewProps> = ({
   work,
+  annotations,
   readerSettings,
   onClose,
   onUpdateProgress,
+  onUpdateTtsPosition,
   onAddAnnotation,
   onUpdateSettings
 }) => {
-  const [currentChapterId, setCurrentChapterId] = useState<string>(work.currentChapterId || work.chapters[0]?.id);
-  const [currentParagraphIndex, setCurrentParagraphIndex] = useState(work.currentParagraphIndex);
+  const [currentChapterId, setCurrentChapterId] = useState<string>(
+    work.ttsChapterId || work.currentChapterId || work.chapters[0]?.id
+  );
+  const [currentParagraphIndex, setCurrentParagraphIndex] = useState(
+    work.ttsChapterId === (work.currentChapterId || work.chapters[0]?.id)
+      ? work.ttsParagraphIndex ?? work.currentParagraphIndex
+      : work.currentParagraphIndex
+  );
   const [toolbarOpen, setToolbarOpen] = useState(false);
   const [chapterNavOpen, setChapterNavOpen] = useState(false);
   const [audioControlsOpen, setAudioControlsOpen] = useState(false);
   const [audioPlaying, setAudioPlaying] = useState(false);
   const [audioPaused, setAudioPaused] = useState(false);
   const [audioError, setAudioError] = useState('');
-  const [audioRate, setAudioRate] = useState(1);
+  const [audioRate, setAudioRate] = useState(() => normalizeAudioRate(work.ttsRate ?? 1));
+  const [audioElapsedSeconds, setAudioElapsedSeconds] = useState(0);
+  const [audioDurationSeconds, setAudioDurationSeconds] = useState(0);
   const [activeSpeechPosition, setActiveSpeechPosition] = useState<{ paragraphIndex: number; characterIndex: number } | null>(null);
   const [selectedParagraphIndex, setSelectedParagraphIndex] = useState<number | null>(null);
   const [selectedCharacterOffset, setSelectedCharacterOffset] = useState(0);
@@ -71,21 +140,39 @@ export const ReaderView: React.FC<ReaderViewProps> = ({
   const speechParagraphRef = useRef<number | null>(null);
   const speechBoundaryHandlerRef = useRef<((characterIndex: number) => void) | null>(null);
   const nativeChunkOffsetRef = useRef(0);
-  const nativeResumePositionRef = useRef({ paragraphIndex: currentParagraphIndex, characterIndex: 0 });
+  const nativeResumePositionRef = useRef({
+    paragraphIndex: work.ttsChapterId === (work.currentChapterId || work.chapters[0]?.id)
+      ? work.ttsParagraphIndex ?? currentParagraphIndex
+      : currentParagraphIndex,
+    characterIndex: work.ttsChapterId === (work.currentChapterId || work.chapters[0]?.id)
+      ? work.ttsCharacterIndex ?? 0
+      : 0
+  });
   const nativeListenerReadyRef = useRef<Promise<void> | null>(null);
   const nativeSpeechLanguageRef = useRef<Promise<string> | null>(null);
   const savedPositionRef = useRef('');
-  
+  const speechPositionDirtyRef = useRef(false);
+
   // Selection and annotation state
+
   const [selectedText, setSelectedText] = useState<string>('');
   const [annotationPopupOpen, setAnnotationPopupOpen] = useState(false);
   const [noteInput, setNoteInput] = useState('');
   const [tagInput, setTagInput] = useState('');
+  const [selectedHighlightColor, setSelectedHighlightColor] = useState<Annotation['highlightColor']>('yellow');
+  const [noteMode, setNoteMode] = useState(false);
 
   const currentChapterIndex = work.chapters.findIndex((c) => c.id === currentChapterId);
   const currentChapter = work.chapters[currentChapterIndex] || work.chapters[0];
   const sourceChapterUrl = currentChapter.url || work.sourceUrl;
   const nativeSpeech = Capacitor.getPlatform() === 'android';
+  const saveSpeechPosition = useCallback(() => {
+    if (!speechPositionDirtyRef.current) return;
+    const { paragraphIndex, characterIndex } = nativeResumePositionRef.current;
+    onUpdateTtsPosition(work.id, currentChapter.id, paragraphIndex, characterIndex, audioRate);
+    speechPositionDirtyRef.current = false;
+  }, [audioRate, currentChapter.id, onUpdateTtsPosition, work.id]);
+
   const speechSupported = nativeSpeech || (typeof window !== 'undefined' && 'speechSynthesis' in window);
 
   const scrollToParagraph = useCallback((paragraphIndex: number, behavior: ScrollBehavior) => {
@@ -132,9 +219,11 @@ export const ReaderView: React.FC<ReaderViewProps> = ({
     setActiveSpeechPosition(null);
     setAudioPlaying(false);
     setAudioPaused(false);
+    setAudioElapsedSeconds(0);
+    setAudioDurationSeconds(0);
   }, [nativeSpeech, speechSupported]);
 
-  const startSpeech = useCallback((startAt: number, characterOffset = 0, rate = audioRate) => {
+  const startSpeech = useCallback((startAt: number, characterOffset = 0, rate = audioRate, preserveTiming = false) => {
     if (!speechSupported) {
       setAudioError('Text-to-speech is not supported by this browser.');
       return;
@@ -145,6 +234,11 @@ export const ReaderView: React.FC<ReaderViewProps> = ({
     }
     const text = paragraphs.join('\n\n');
     if (!text.trim()) return;
+    const estimatedDuration = estimateSpeechDuration(text, rate);
+    if (!preserveTiming) {
+      setAudioElapsedSeconds(0);
+      setAudioDurationSeconds(estimatedDuration);
+    }
     speechParagraphRef.current = startAt;
     setCurrentParagraphIndex(startAt);
     setActiveSpeechPosition(null);
@@ -164,6 +258,7 @@ export const ReaderView: React.FC<ReaderViewProps> = ({
     });
     const speechId = ++speechIdRef.current;
     nativeResumePositionRef.current = { paragraphIndex: startAt, characterIndex: characterOffset };
+    speechPositionDirtyRef.current = true;
     const handleBoundary = (boundaryOffset: number) => {
       if (speechId !== speechIdRef.current) return;
       let segmentParagraphIndex = paragraphStarts.length - 1;
@@ -177,6 +272,8 @@ export const ReaderView: React.FC<ReaderViewProps> = ({
       const localCharacterIndex = boundaryOffset - paragraphStarts[segmentParagraphIndex]
         + (segmentParagraphIndex === 0 ? characterOffset : 0);
       nativeResumePositionRef.current = { paragraphIndex, characterIndex: localCharacterIndex };
+      speechPositionDirtyRef.current = true;
+      onUpdateTtsPosition(work.id, currentChapter.id, paragraphIndex, localCharacterIndex, audioRate);
       setActiveSpeechPosition({ paragraphIndex, characterIndex: localCharacterIndex });
       scrollSpeechWordIntoView(paragraphIndex, localCharacterIndex);
       if (speechParagraphRef.current !== paragraphIndex) {
@@ -196,6 +293,7 @@ export const ReaderView: React.FC<ReaderViewProps> = ({
       speechParagraphRef.current = null;
       speechBoundaryHandlerRef.current = null;
       setActiveSpeechPosition(null);
+      setAudioElapsedSeconds(audioDurationSeconds);
       setAudioPlaying(false);
       setAudioPaused(false);
     };
@@ -221,31 +319,51 @@ export const ReaderView: React.FC<ReaderViewProps> = ({
         return;
       }
       const chunks = splitNativeSpeechText(text);
-      void listenerReady
-        .then(async () => {
-          if (!nativeSpeechLanguageRef.current) {
-            nativeSpeechLanguageRef.current = TextToSpeech.getSupportedLanguages().then(({ languages }) => {
-              const availableLanguages = languages.filter((language) => language && language.toLowerCase() !== 'und');
-              const language = selectNativeSpeechLanguage(navigator.language || 'en-US', availableLanguages);
-              if (!language) throw new Error('No speech voices are installed on this device.');
-              return language;
-            });
-          }
-          const language = await nativeSpeechLanguageRef.current;
-          for (const chunk of chunks) {
-            if (speechId !== speechIdRef.current) return;
-            nativeChunkOffsetRef.current = chunk.start;
-            await TextToSpeech.speak({
-              text: chunk.text,
-              lang: language,
-              rate,
-              queueStrategy: QueueStrategy.Flush
-            });
-          }
-          finishSpeech();
-        })
-        .catch(failSpeech);
-      return;
+        void listenerReady
+            .then(async () => {
+              const { languages } = await TextToSpeech.getSupportedLanguages();
+
+              const availableLanguages = languages.filter(
+                (language) => language && language.toLowerCase() !== 'und'
+              );
+
+              const detectedLanguage = detectTextLanguage(text);
+
+              if (!detectedLanguage) {
+                throw new Error(
+                  'Could not identify the text language. Try a longer passage.'
+                );
+              }
+
+              const language = selectNativeSpeechLanguage(
+                detectedLanguage,
+                availableLanguages
+              );
+
+              if (!language) {
+                throw new Error(
+                  `No installed speech voice is available for: ${detectedLanguage}`
+                );
+              }
+
+              for (const chunk of chunks) {
+                if (speechId !== speechIdRef.current) return;
+
+                nativeChunkOffsetRef.current = chunk.start;
+
+                await TextToSpeech.speak({
+                  text: chunk.text,
+                  lang: language,
+                  rate,
+                  queueStrategy: QueueStrategy.Flush
+                });
+              }
+
+              finishSpeech();
+            })
+            .catch(failSpeech);
+
+          return;
     }
     window.speechSynthesis.cancel();
     const utterance = new SpeechSynthesisUtterance(text);
@@ -257,10 +375,18 @@ export const ReaderView: React.FC<ReaderViewProps> = ({
     };
     utteranceRef.current = utterance;
     window.speechSynthesis.speak(utterance);
-  }, [audioRate, currentChapter, currentChapterIndex, nativeSpeech, onUpdateProgress, scrollSpeechWordIntoView, speechSupported, work.chapters.length, work.id]);
+  }, [audioDurationSeconds, audioRate, currentChapter, currentChapterIndex, nativeSpeech, onUpdateProgress, onUpdateTtsPosition, scrollSpeechWordIntoView, speechSupported, work.chapters.length, work.id]);
 
   useEffect(() => {
-    if (!nativeSpeech) return;
+    if (!audioPlaying || audioPaused) return;
+    const timer = window.setInterval(() => {
+      setAudioElapsedSeconds((elapsed) => Math.min(audioDurationSeconds, elapsed + 1));
+    }, 1000);
+    return () => window.clearInterval(timer);
+  }, [audioDurationSeconds, audioPaused, audioPlaying]);
+
+  useEffect(() => {
+    if (!nativeSpeech || audioPaused) return;
     let disposed = false;
     let listener: PluginListenerHandle | null = null;
     const listenerReady = TextToSpeech.addListener('onRangeStart', ({ start }) => {
@@ -293,6 +419,11 @@ export const ReaderView: React.FC<ReaderViewProps> = ({
     };
   }, [nativeSpeech]);
 
+  useEffect(() => {
+    if (audioPlaying) return;
+    saveSpeechPosition();
+  }, [audioPlaying, saveSpeechPosition]);
+
   const getVisibleParagraphIndex = useCallback(() => {
     const reader = readerRef.current;
     if (!reader) return currentParagraphIndex;
@@ -318,7 +449,11 @@ export const ReaderView: React.FC<ReaderViewProps> = ({
   useEffect(() => {
     const reader = readerRef.current;
     if (!reader) return;
-    const savedParagraph = currentChapterId === work.currentChapterId ? work.currentParagraphIndex : 0;
+    const savedParagraph = currentChapterId === work.ttsChapterId
+      ? work.ttsParagraphIndex ?? 0
+      : currentChapterId === work.currentChapterId
+        ? work.currentParagraphIndex
+        : 0;
     setCurrentParagraphIndex(savedParagraph);
     const frame = window.requestAnimationFrame(() => {
       scrollToParagraph(savedParagraph, 'auto');
@@ -361,6 +496,7 @@ export const ReaderView: React.FC<ReaderViewProps> = ({
     if (currentChapterIndex > 0) {
       const prev = work.chapters[currentChapterIndex - 1];
       stopSpeech();
+      nativeResumePositionRef.current = { paragraphIndex: 0, characterIndex: 0 };
       setCurrentChapterId(prev.id);
       setCurrentParagraphIndex(0);
       onUpdateProgress(work.id, prev.id, 0, Math.round(((currentChapterIndex - 1) / work.chapters.length) * 100));
@@ -372,6 +508,7 @@ export const ReaderView: React.FC<ReaderViewProps> = ({
     if (currentChapterIndex < work.chapters.length - 1) {
       const next = work.chapters[currentChapterIndex + 1];
       stopSpeech();
+      nativeResumePositionRef.current = { paragraphIndex: 0, characterIndex: 0 };
       setCurrentChapterId(next.id);
       setCurrentParagraphIndex(0);
       onUpdateProgress(work.id, next.id, 0, Math.round(((currentChapterIndex + 1) / work.chapters.length) * 100));
@@ -398,15 +535,25 @@ export const ReaderView: React.FC<ReaderViewProps> = ({
     }
   };
 
+  const handleSelectionEnd = () => {
+    window.setTimeout(handleTextSelection, 0);
+  };
+
   const handlePlayPause = () => {
     setAudioError('');
     if (!speechSupported) return;
     if (!audioPlaying) {
-      startSpeech(currentParagraphIndex);
+      const savedChapterId = work.ttsChapterId;
+      const hasSavedSpeechPosition = savedChapterId === currentChapter.id
+        && typeof work.ttsParagraphIndex === 'number';
+      startSpeech(
+        hasSavedSpeechPosition ? work.ttsParagraphIndex! : currentParagraphIndex,
+        hasSavedSpeechPosition ? work.ttsCharacterIndex ?? 0 : 0
+      );
     } else if (audioPaused) {
       if (nativeSpeech) {
         const { paragraphIndex, characterIndex } = nativeResumePositionRef.current;
-        startSpeech(paragraphIndex, characterIndex);
+        startSpeech(paragraphIndex, characterIndex, audioRate, true);
       } else {
         window.speechSynthesis.resume();
         setAudioPaused(false);
@@ -432,13 +579,26 @@ export const ReaderView: React.FC<ReaderViewProps> = ({
   };
 
   const handleAudioRateChange = (rate: number) => {
-    setAudioRate(rate);
-    if (!nativeSpeech || !audioPlaying || audioPaused) return;
+    const normalizedRate = normalizeAudioRate(rate);
+    setAudioRate(normalizedRate);
+    onUpdateTtsPosition(
+      work.id,
+      currentChapter.id,
+      nativeResumePositionRef.current.paragraphIndex,
+      nativeResumePositionRef.current.characterIndex,
+      normalizedRate
+    );
+    if (!audioPlaying) return;
+    setAudioDurationSeconds((duration) => {
+      const remaining = Math.max(0, duration - audioElapsedSeconds);
+      return Math.max(audioElapsedSeconds + 1, audioElapsedSeconds + Math.ceil(remaining * audioRate / normalizedRate));
+    });
+    if (!nativeSpeech || audioPaused) return;
     const { paragraphIndex, characterIndex } = nativeResumePositionRef.current;
     speechIdRef.current += 1;
     speechBoundaryHandlerRef.current = null;
     void TextToSpeech.stop()
-      .then(() => startSpeech(paragraphIndex, characterIndex, rate))
+      .then(() => startSpeech(paragraphIndex, characterIndex, normalizedRate, true))
       .catch((error: unknown) => {
         setAudioError(`Could not change text-to-speech speed: ${error instanceof Error ? error.message : String(error)}`);
         setAudioPlaying(false);
@@ -466,7 +626,7 @@ export const ReaderView: React.FC<ReaderViewProps> = ({
     setAudioControlsOpen(true);
   };
 
-  const handleSaveAnnotation = () => {
+  const handleSaveAnnotation = (highlightColor = selectedHighlightColor) => {
     if (!selectedText) return;
     onAddAnnotation({
       workId: work.id,
@@ -474,19 +634,29 @@ export const ReaderView: React.FC<ReaderViewProps> = ({
       chapterId: currentChapter.id,
       chapterTitle: currentChapter.title,
       selectedText,
-      highlightColor: 'pink',
+      paragraphIndex: selectedParagraphIndex ?? undefined,
+      startOffset: selectedCharacterOffset,
+      endOffset: selectedCharacterOffset + selectedText.length,
+      highlightColor,
       note: noteInput,
       tags: tagInput ? tagInput.split(',').map((t) => t.trim()) : ['Highlight']
     });
     setSelectedText('');
     setNoteInput('');
     setTagInput('');
+    setNoteMode(false);
     setAnnotationPopupOpen(false);
+  };
+
+  const handleHighlight = (color: Annotation['highlightColor']) => {
+    handleSaveAnnotation(color);
   };
 
   const handleCloseReader = () => {
     saveReadingPosition();
+    saveSpeechPosition();
     stopSpeech();
+    nativeResumePositionRef.current = { paragraphIndex: 0, characterIndex: 0 };
     onClose();
   };
 
@@ -494,6 +664,7 @@ export const ReaderView: React.FC<ReaderViewProps> = ({
     const chapterIndex = work.chapters.findIndex((chapter) => chapter.id === chapterId);
     if (chapterIndex < 0) return;
     stopSpeech();
+    nativeResumePositionRef.current = { paragraphIndex: 0, characterIndex: 0 };
     setCurrentChapterId(chapterId);
     setCurrentParagraphIndex(0);
     setChapterNavOpen(false);
@@ -569,6 +740,7 @@ export const ReaderView: React.FC<ReaderViewProps> = ({
             {audioPlaying && !audioPaused ? <Pause className="w-3.5 h-3.5" /> : <Play className="w-3.5 h-3.5" />}
             <span className="hidden md:inline">{audioPlaying ? (audioPaused ? 'Resume' : 'Pause') : speechSupported ? 'Listen' : 'TTS unavailable'}</span>
           </button>
+
           <button
             onClick={() => setAudioControlsOpen((open) => !open)}
             aria-expanded={audioControlsOpen}
@@ -608,19 +780,38 @@ export const ReaderView: React.FC<ReaderViewProps> = ({
           className="sticky top-14 z-20 mx-auto flex max-w-xl flex-wrap items-center justify-between gap-3 border-b px-4 py-3 text-xs shadow-md"
           style={{ backgroundColor: 'var(--bg-elevated)', borderColor: 'var(--border-color)' }}
         >
-          <label className="flex items-center gap-2">
-            <span>Speed</span>
-            <select
-              value={audioRate}
-              onChange={(event) => handleAudioRateChange(Number(event.target.value))}
-              className="rounded border bg-[var(--bg-main)] px-2 py-1 text-[var(--text-main)]"
-              style={{ borderColor: 'var(--border-color)' }}
-            >
-              {[0.75, 1, 1.25, 1.5, 1.75, 2].map((rate) => (
-                <option key={rate} value={rate}>{rate}×</option>
-              ))}
-            </select>
-          </label>
+          <div className="flex items-center gap-2">
+            <span id="audio-speed-label">Speed</span>
+            <div className="flex items-center rounded border" style={{ borderColor: 'var(--border-color)' }}>
+              <button
+                type="button"
+                onClick={() => handleAudioRateChange(audioRate - AUDIO_RATE_STEP)}
+                disabled={audioRate <= MIN_AUDIO_RATE}
+                aria-label="Decrease text-to-speech speed"
+                title="Decrease speed"
+                className="p-1.5 transition-colors hover:opacity-80 disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                <Minus className="h-3.5 w-3.5" />
+              </button>
+              <span
+                aria-live="polite"
+                aria-labelledby="audio-speed-label"
+                className="min-w-12 px-2 text-center font-medium"
+              >
+                {formatAudioRate(audioRate)}×
+              </span>
+              <button
+                type="button"
+                onClick={() => handleAudioRateChange(audioRate + AUDIO_RATE_STEP)}
+                disabled={audioRate >= MAX_AUDIO_RATE}
+                aria-label="Increase text-to-speech speed"
+                title="Increase speed"
+                className="p-1.5 transition-colors hover:opacity-80 disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                <Plus className="h-3.5 w-3.5" />
+              </button>
+            </div>
+          </div>
           <span className="opacity-70">
             {audioPlaying ? (audioPaused ? 'Paused' : 'Playing') : 'Stopped'} · paragraph {currentParagraphIndex + 1}
           </span>
@@ -642,6 +833,93 @@ export const ReaderView: React.FC<ReaderViewProps> = ({
           >
             <Square className="h-3 w-3" /> Stop
           </button>
+        </section>
+      )}
+
+      {audioPlaying && (
+        <section
+          aria-label="Text-to-speech player"
+          className="fixed inset-x-0 bottom-0 z-40 border-t px-4 pb-[calc(0.75rem+var(--safe-area-bottom))] pt-3 shadow-2xl backdrop-blur-md"
+          style={{ backgroundColor: 'color-mix(in srgb, var(--bg-elevated) 94%, transparent)', borderColor: 'var(--border-color)' }}
+        >
+          <div className="mx-auto max-w-3xl space-y-2">
+            <div className="flex items-center justify-between gap-3 text-xs">
+              <div className="flex min-w-0 items-center gap-2">
+                <Timer className="h-4 w-4 shrink-0" style={{ color: 'var(--accent)' }} />
+                <span className="truncate font-medium">{work.title}</span>
+                <span className="hidden shrink-0 opacity-60 sm:inline">· Ch. {currentChapter.number}</span>
+              </div>
+              <span className="shrink-0 opacity-75">
+                {formatAudioTime(audioElapsedSeconds)} / {formatAudioTime(audioDurationSeconds)}
+              </span>
+            </div>
+
+            <div
+              className="h-1 overflow-hidden rounded-full"
+              role="progressbar"
+              aria-label="Reading progress"
+              aria-valuemin={0}
+              aria-valuemax={audioDurationSeconds}
+              aria-valuenow={Math.min(audioElapsedSeconds, audioDurationSeconds)}
+              style={{ backgroundColor: 'var(--border-color)' }}
+            >
+              <div
+                className="h-full transition-[width] duration-500"
+                style={{
+                  width: `${audioDurationSeconds ? Math.min(100, (audioElapsedSeconds / audioDurationSeconds) * 100) : 0}%`,
+                  backgroundColor: 'var(--accent)'
+                }}
+              />
+            </div>
+
+            <div className="flex items-center justify-between gap-3 text-xs">
+              <span className="opacity-70">
+                {formatAudioTime(Math.max(0, audioDurationSeconds - audioElapsedSeconds))} remaining
+              </span>
+              <div className="flex items-center gap-2">
+                <div className="flex items-center rounded border" style={{ borderColor: 'var(--border-color)' }}>
+                  <button
+                    type="button"
+                    onClick={() => handleAudioRateChange(audioRate - AUDIO_RATE_STEP)}
+                    disabled={audioRate <= MIN_AUDIO_RATE}
+                    aria-label="Decrease text-to-speech speed"
+                    className="p-1.5 disabled:opacity-40"
+                  >
+                    <Minus className="h-3.5 w-3.5" />
+                  </button>
+                  <span className="min-w-10 text-center">{formatAudioRate(audioRate)}×</span>
+                  <button
+                    type="button"
+                    onClick={() => handleAudioRateChange(audioRate + AUDIO_RATE_STEP)}
+                    disabled={audioRate >= MAX_AUDIO_RATE}
+                    aria-label="Increase text-to-speech speed"
+                    className="p-1.5 disabled:opacity-40"
+                  >
+                    <Plus className="h-3.5 w-3.5" />
+                  </button>
+                </div>
+                <button
+                  type="button"
+                  onClick={handlePlayPause}
+                  aria-label={audioPaused ? 'Resume text-to-speech' : 'Pause text-to-speech'}
+                  className="flex items-center gap-1.5 rounded border px-3 py-1.5 font-medium"
+                  style={{ backgroundColor: 'var(--accent)', borderColor: 'var(--accent)', color: 'var(--bg-main)' }}
+                >
+                  {audioPaused ? <Play className="h-3.5 w-3.5" /> : <Pause className="h-3.5 w-3.5" />}
+                  <span>{audioPaused ? 'Play' : 'Pause'}</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={stopSpeech}
+                  aria-label="Stop text-to-speech"
+                  className="rounded border p-1.5"
+                  style={{ borderColor: 'var(--border-color)' }}
+                >
+                  <Square className="h-3.5 w-3.5" />
+                </button>
+              </div>
+            </div>
+          </div>
         </section>
       )}
 
@@ -687,9 +965,9 @@ export const ReaderView: React.FC<ReaderViewProps> = ({
 
       {/* Main Reading Content Area */}
       <main
-        onMouseUp={handleTextSelection}
-        onTouchEnd={handleTextSelection}
-        className="mx-auto px-4 sm:px-8 py-12 transition-all"
+        onMouseUp={handleSelectionEnd}
+        onTouchEnd={handleSelectionEnd}
+        className="mx-auto px-4 sm:px-8 py-12 pb-36 transition-all"
         style={{ maxWidth: readerSettings.contentWidth }}
       >
         <div className="space-y-6">
@@ -723,14 +1001,37 @@ export const ReaderView: React.FC<ReaderViewProps> = ({
                   const isSpeaking = activeSpeechPosition?.paragraphIndex === idx
                     && activeSpeechPosition.characterIndex >= start
                     && activeSpeechPosition.characterIndex < end;
+                  const annotation = annotations.find((item) =>
+                    item.workId === work.id
+                    && item.chapterId === currentChapter.id
+                    && item.paragraphIndex === idx
+                    && (item.startOffset ?? -1) < end
+                    && (item.endOffset ?? -1) > start
+                  );
+                  const wordStart = Math.max(start, annotation?.startOffset ?? start);
+                  const wordEnd = Math.min(end, annotation?.endOffset ?? end);
+                  const highlightedText = annotation && wordStart < wordEnd
+                    ? (
+                      <>
+                        {text.slice(0, wordStart - start)}
+                        <mark
+                          className="rounded-sm px-0.5"
+                          style={{ backgroundColor: `var(--highlight-${annotation.highlightColor})`, color: 'inherit' }}
+                        >
+                          {text.slice(wordStart - start, wordEnd - start)}
+                        </mark>
+                        {text.slice(wordEnd - start)}
+                      </>
+                    )
+                    : text;
                   textParts.push(
                     <span
                       key={start}
                       data-word-start={start}
                       data-word-end={end}
-                      className={isSpeaking ? 'rounded-sm bg-amber-300/80 text-slate-950 ring-1 ring-amber-500/60' : undefined}
+                      className={isSpeaking ? 'rounded-sm bg-[var(--accent)] text-[var(--bg-main)] ring-1 ring-[var(--accent)]' : undefined}
                     >
-                      {text}
+                      {highlightedText}
                     </span>
                   );
                 }
@@ -840,11 +1141,11 @@ export const ReaderView: React.FC<ReaderViewProps> = ({
       </main>
 
       {/* Annotation Popup when text is selected */}
-      {annotationPopupOpen && (
+      {annotationPopupOpen && selectedText && (
         <div className="fixed bottom-20 left-1/2 transform -translate-x-1/2 z-50 w-full max-w-md p-4 rounded border shadow-2xl space-y-3 bg-[var(--bg-elevated)] border-[var(--border-color)] text-[var(--text-main)]">
           <div className="flex items-center justify-between">
             <span className="font-serif text-xs font-medium flex items-center gap-1" style={{ color: 'var(--accent)' }}>
-              <Highlighter className="w-3.5 h-3.5" /> Add Private Highlight & Note
+              <Highlighter className="w-3.5 h-3.5" /> Selected passage
             </span>
             <button onClick={() => setAnnotationPopupOpen(false)} className="p-1 opacity-70 hover:opacity-100">
               <X className="w-4 h-4" />
@@ -855,7 +1156,34 @@ export const ReaderView: React.FC<ReaderViewProps> = ({
             "{selectedText}"
           </blockquote>
 
-          {selectedParagraphIndex !== null && (
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="text-xs opacity-70">Highlight:</span>
+            {(['yellow', 'pink', 'blue', 'green', 'purple'] as const).map((color) => (
+              <button
+                key={color}
+                type="button"
+                onClick={() => handleHighlight(color)}
+                aria-label={`Highlight ${color}`}
+                title={`Highlight ${color}`}
+                className="h-6 w-6 rounded-full border-2 transition-transform hover:scale-110"
+                style={{
+                  backgroundColor: `var(--highlight-${color})`,
+                  borderColor: selectedHighlightColor === color ? 'var(--text-main)' : 'transparent'
+                }}
+              />
+            ))}
+          </div>
+
+          <div className="flex flex-wrap gap-2">
+            <button
+              type="button"
+              onClick={() => setNoteMode((open) => !open)}
+              className={`flex items-center gap-1 rounded border px-3 py-1.5 text-xs ${noteMode ? 'bg-[var(--highlight-bg)]' : ''}`}
+              style={{ borderColor: 'var(--border-color)' }}
+            >
+              <Bookmark className="h-3 w-3" /> Leave a note
+            </button>
+            {selectedParagraphIndex !== null && (
             <button
               onClick={handleReadFromSelection}
               className="flex items-center gap-1 rounded border px-3 py-1.5 text-xs"
@@ -863,23 +1191,29 @@ export const ReaderView: React.FC<ReaderViewProps> = ({
             >
               <Play className="h-3 w-3" /> Read from selected passage
             </button>
+            )}
+          </div>
+
+          {noteMode && (
+            <>
+              <textarea
+                value={noteInput}
+                onChange={(e) => setNoteInput(e.target.value)}
+                placeholder="Add private note..."
+                rows={2}
+                autoFocus
+                className="w-full p-2 text-xs rounded border outline-none bg-[var(--bg-main)] border-[var(--border-color)] text-[var(--text-main)]"
+              />
+
+              <input
+                type="text"
+                value={tagInput}
+                onChange={(e) => setTagInput(e.target.value)}
+                placeholder="Tags separated by comma (e.g. Romance, Worldbuilding)"
+                className="w-full p-2 text-xs rounded border outline-none bg-[var(--bg-main)] border-[var(--border-color)] text-[var(--text-main)]"
+              />
+            </>
           )}
-
-          <textarea
-            value={noteInput}
-            onChange={(e) => setNoteInput(e.target.value)}
-            placeholder="Add private note (optional)..."
-            rows={2}
-            className="w-full p-2 text-xs rounded border outline-none bg-[var(--bg-main)] border-[var(--border-color)] text-[var(--text-main)]"
-          />
-
-          <input
-            type="text"
-            value={tagInput}
-            onChange={(e) => setTagInput(e.target.value)}
-            placeholder="Tags separated by comma (e.g. Romance, Worldbuilding)"
-            className="w-full p-2 text-xs rounded border outline-none bg-[var(--bg-main)] border-[var(--border-color)] text-[var(--text-main)]"
-          />
 
           <div className="flex justify-end gap-2 pt-1">
             <button
@@ -889,10 +1223,11 @@ export const ReaderView: React.FC<ReaderViewProps> = ({
               Cancel
             </button>
             <button
-              onClick={handleSaveAnnotation}
+              onClick={() => handleSaveAnnotation()}
+              disabled={!noteMode || !noteInput.trim()}
               className="flex items-center gap-1 px-4 py-1.5 rounded text-xs font-medium bg-[var(--accent)] text-[var(--bg-main)]"
             >
-              <Check className="w-3.5 h-3.5" /> Save to Notebook
+              <Check className="w-3.5 h-3.5" /> Save note
             </button>
           </div>
         </div>
