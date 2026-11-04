@@ -1,0 +1,90 @@
+name: Publish Android APK
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v4
+
+      - name: Check release configuration
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          MAIA_UPLOAD_KEY_ALIAS: ${{ secrets.MAIA_UPLOAD_KEY_ALIAS }}
+          MAIA_UPLOAD_KEY_PASSWORD: ${{ secrets.MAIA_UPLOAD_KEY_PASSWORD }}
+          MAIA_UPLOAD_STORE_PASSWORD: ${{ secrets.MAIA_UPLOAD_STORE_PASSWORD }}
+          VITE_SUPABASE_ANON_KEY: ${{ secrets.VITE_SUPABASE_ANON_KEY }}
+          VITE_SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
+        run: |
+          if [ -z "$ANDROID_KEYSTORE_BASE64" ] || \
+             [ -z "$MAIA_UPLOAD_KEY_ALIAS" ] || \
+             [ -z "$MAIA_UPLOAD_KEY_PASSWORD" ] || \
+             [ -z "$MAIA_UPLOAD_STORE_PASSWORD" ] || \
+             [ -z "$VITE_SUPABASE_ANON_KEY" ] || \
+             [ -z "$VITE_SUPABASE_URL" ]; then
+            echo "::error::Configure all required signing and Supabase repository secrets before publishing a release."
+            exit 1
+          fi
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build web app and sync Android
+        env:
+          VITE_SUPABASE_ANON_KEY: ${{ secrets.VITE_SUPABASE_ANON_KEY }}
+          VITE_SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
+        run: npm run android:sync
+
+      - name: Configure signing key
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+        run: |
+          printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/maia-upload-key.jks"
+          chmod 600 "$RUNNER_TEMP/maia-upload-key.jks"
+
+      - name: Build signed release APK
+        working-directory: android
+        env:
+          MAIA_UPLOAD_KEY_ALIAS: ${{ secrets.MAIA_UPLOAD_KEY_ALIAS }}
+          MAIA_UPLOAD_KEY_PASSWORD: ${{ secrets.MAIA_UPLOAD_KEY_PASSWORD }}
+          MAIA_UPLOAD_STORE_PASSWORD: ${{ secrets.MAIA_UPLOAD_STORE_PASSWORD }}
+        run: |
+          ./gradlew :app:assembleRelease \
+            -PMAIA_UPLOAD_STORE_FILE="$RUNNER_TEMP/maia-upload-key.jks" \
+            -PMAIA_UPLOAD_STORE_PASSWORD="$MAIA_UPLOAD_STORE_PASSWORD" \
+            -PMAIA_UPLOAD_KEY_ALIAS="$MAIA_UPLOAD_KEY_ALIAS" \
+            -PMAIA_UPLOAD_KEY_PASSWORD="$MAIA_UPLOAD_KEY_PASSWORD" \
+            -PMAIA_VERSION_NAME="${GITHUB_REF_NAME#v}" \
+            -PMAIA_VERSION_CODE="$GITHUB_RUN_NUMBER"
+
+      - name: Publish APK on GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            android/app/build/outputs/apk/release/app-release.apk \
+            --title "Maia ${GITHUB_REF_NAME#v}" \
+            --generate-notes
