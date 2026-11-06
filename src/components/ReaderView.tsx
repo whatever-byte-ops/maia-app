@@ -1,8 +1,8 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Capacitor, type PluginListenerHandle } from '@capacitor/core';
 import { QueueStrategy, TextToSpeech } from '@capacitor-community/text-to-speech';
 import { Work, ReaderSettings, Annotation } from '../types';
-import { ArrowLeft, ChevronLeft, ChevronRight, Menu, Settings as SettingsIcon, Volume2, Play, Pause, Square, Bookmark, Globe, MessageSquare, ThumbsUp, X, Check, Highlighter, Plus, Minus, Timer } from 'lucide-react';
+import { ArrowLeft, ChevronLeft, ChevronRight, Menu, Settings as SettingsIcon, Volume2, Play, Pause, Square, Bookmark, Globe, X, Check, Highlighter, Plus, Minus, Timer } from 'lucide-react';
 import { franc } from 'franc';
 import { iso6393To1 } from 'iso-639-3';
 
@@ -35,16 +35,16 @@ const estimateSpeechDuration = (text: string, rate: number) => {
   return Math.max(1, Math.ceil((wordCount / (150 * rate)) * 60));
 };
 
-const splitNativeSpeechText = (text: string) => {
+const splitNativeSpeechText = (text: string, maxLength = MAX_NATIVE_SPEECH_CHUNK_LENGTH) => {
   const chunks: { text: string; start: number }[] = [];
   let start = 0;
   while (start < text.length) {
-    let end = Math.min(start + MAX_NATIVE_SPEECH_CHUNK_LENGTH, text.length);
+    let end = Math.min(start + maxLength, text.length);
     if (end < text.length) {
       const lastSpace = text.lastIndexOf(' ', end);
       const lastNewline = text.lastIndexOf('\n', end);
       const boundary = Math.max(lastSpace, lastNewline);
-      if (boundary > start + MAX_NATIVE_SPEECH_CHUNK_LENGTH / 2) end = boundary + 1;
+      if (boundary > start + maxLength / 2) end = boundary + 1;
       if (text.charCodeAt(end - 1) >= 0xd800 && text.charCodeAt(end - 1) <= 0xdbff) end -= 1;
     }
     chunks.push({ text: text.slice(start, end), start });
@@ -93,6 +93,116 @@ const selectNativeSpeechLanguage = (
   return null;
 };
 
+const SPEAKING_WORD_CLASS = 'rounded-sm bg-[var(--accent)] text-[var(--bg-main)] ring-1 ring-[var(--accent)]';
+const SPEAKING_SPACE_CLASS = 'bg-[var(--accent)] text-[var(--bg-main)]';
+
+type ChapterParagraphProps = {
+  index: number;
+  text: string;
+  workId: string;
+  chapterId: string;
+  annotations: Annotation[];
+  // Posición de la letra que se está leyendo en este párrafo, o -1 si no se lee aquí
+  speakingCharacterIndex: number;
+  // Fin del rango leído (solo iOS). Si no existe, se ilumina una sola palabra.
+  speakingEndCharacterIndex?: number;
+};
+
+const ChapterParagraph = React.memo(function ChapterParagraph({
+  index,
+  text,
+  workId,
+  chapterId,
+  annotations,
+  speakingCharacterIndex,
+  speakingEndCharacterIndex
+}: ChapterParagraphProps) {
+  // Se separa el texto en palabras y espacios una sola vez por párrafo
+  const tokens = useMemo(() => {
+    const result: { text: string; start: number; end: number; isSpace: boolean }[] = [];
+    const pattern = /\S+|\s+/g;
+    let match: RegExpExecArray | null;
+    while ((match = pattern.exec(text)) !== null) {
+      result.push({
+        text: match[0],
+        start: match.index,
+        end: match.index + match[0].length,
+        isSpace: /^\s+$/.test(match[0])
+      });
+    }
+    return result;
+  }, [text]);
+
+  return (
+    <p data-paragraph-index={index} className="indent-4 sm:indent-6">
+      {tokens.map((token) => {
+        // Con rango (iOS): se ilumina todo lo que cae dentro del fragmento.
+        // Sin rango (Android): se ilumina solo la palabra que suena, como antes.
+        const isSpeaking = speakingEndCharacterIndex !== undefined
+          ? token.end > speakingCharacterIndex && token.start < speakingEndCharacterIndex
+          : !token.isSpace && speakingCharacterIndex >= token.start && speakingCharacterIndex < token.end;
+
+        if (token.isSpace) {
+          return (
+            <span key={token.start} className={isSpeaking ? SPEAKING_SPACE_CLASS : undefined}>
+              {token.text}
+            </span>
+          );
+        }
+
+        const annotation = annotations.find((item) =>
+          item.workId === workId
+          && item.chapterId === chapterId
+          && item.paragraphIndex === index
+          && (item.startOffset ?? -1) < token.end
+          && (item.endOffset ?? -1) > token.start
+        );
+
+        const wordStart = Math.max(token.start, annotation?.startOffset ?? token.start);
+        const wordEnd = Math.min(token.end, annotation?.endOffset ?? token.end);
+        const content = annotation && wordStart < wordEnd
+          ? (
+            <>
+              {token.text.slice(0, wordStart - token.start)}
+              <mark
+                className="rounded-sm px-0.5"
+                style={{ backgroundColor: `var(--highlight-${annotation.highlightColor})`, color: 'inherit' }}
+              >
+                {token.text.slice(wordStart - token.start, wordEnd - token.start)}
+              </mark>
+              {token.text.slice(wordEnd - token.start)}
+            </>
+          )
+          : token.text;
+
+        return (
+          <span
+            key={token.start}
+            data-word-start={token.start}
+            data-word-end={token.end}
+            className={isSpeaking ? SPEAKING_WORD_CLASS : undefined}
+          >
+            {content}
+          </span>
+        );
+      })}
+    </p>
+  );
+});
+
+const getSafeHttpUrl = (url: string | null | undefined): string | null => {
+  if (!url) return null;
+  try {
+    const parsed = new URL(url);
+    return parsed.protocol === 'http:' || parsed.protocol === 'https:'
+      ? parsed.href
+      : null;
+  } catch {
+    // Si la dirección no se puede leer (por ejemplo, una ruta relativa), no se usa
+    return null;
+  }
+};
+
 interface ReaderViewProps {
   work: Work;
   annotations: Annotation[];
@@ -131,9 +241,8 @@ export const ReaderView: React.FC<ReaderViewProps> = ({
   const [audioRate, setAudioRate] = useState(() => normalizeAudioRate(work.ttsRate ?? 1));
   const [audioElapsedSeconds, setAudioElapsedSeconds] = useState(0);
   const [audioDurationSeconds, setAudioDurationSeconds] = useState(0);
-  const [activeSpeechPosition, setActiveSpeechPosition] = useState<{ paragraphIndex: number; characterIndex: number } | null>(null);
-  const [selectedParagraphIndex, setSelectedParagraphIndex] = useState<number | null>(null);
-  const [selectedCharacterOffset, setSelectedCharacterOffset] = useState(0);
+  const [activeSpeechPosition, setActiveSpeechPosition] = useState<{ paragraphIndex: number; characterIndex: number; endCharacterIndex?: number } | null>(null);
+  const [selectedParagraphIndex, setSelectedParagraphIndex] = useState<number | null>(null);  const [selectedCharacterOffset, setSelectedCharacterOffset] = useState(0);
   const readerRef = useRef<HTMLDivElement>(null);
   const utteranceRef = useRef<SpeechSynthesisUtterance | null>(null);
   const speechIdRef = useRef(0);
@@ -152,6 +261,7 @@ export const ReaderView: React.FC<ReaderViewProps> = ({
   const nativeSpeechLanguageRef = useRef<Promise<string> | null>(null);
   const savedPositionRef = useRef('');
   const speechPositionDirtyRef = useRef(false);
+  const audioDurationRef = useRef(0);
 
   // Selection and annotation state
 
@@ -165,7 +275,8 @@ export const ReaderView: React.FC<ReaderViewProps> = ({
   const currentChapterIndex = work.chapters.findIndex((c) => c.id === currentChapterId);
   const currentChapter = work.chapters[currentChapterIndex] || work.chapters[0];
   const sourceChapterUrl = currentChapter.url || work.sourceUrl;
-  const nativeSpeech = Capacitor.getPlatform() === 'android';
+  const safeChapterUrl = getSafeHttpUrl(sourceChapterUrl);
+  const nativeSpeech = Capacitor.isNativePlatform();
   const saveSpeechPosition = useCallback(() => {
     if (!speechPositionDirtyRef.current) return;
     const { paragraphIndex, characterIndex } = nativeResumePositionRef.current;
@@ -259,8 +370,7 @@ export const ReaderView: React.FC<ReaderViewProps> = ({
     const speechId = ++speechIdRef.current;
     nativeResumePositionRef.current = { paragraphIndex: startAt, characterIndex: characterOffset };
     speechPositionDirtyRef.current = true;
-    const handleBoundary = (boundaryOffset: number) => {
-      if (speechId !== speechIdRef.current) return;
+    const handleBoundary = (boundaryOffset: number, boundaryEndOffset?: number) => {      if (speechId !== speechIdRef.current) return;
       let segmentParagraphIndex = paragraphStarts.length - 1;
       for (let index = 0; index < paragraphStarts.length - 1; index += 1) {
         if (boundaryOffset < paragraphStarts[index + 1]) {
@@ -274,7 +384,13 @@ export const ReaderView: React.FC<ReaderViewProps> = ({
       nativeResumePositionRef.current = { paragraphIndex, characterIndex: localCharacterIndex };
       speechPositionDirtyRef.current = true;
       onUpdateTtsPosition(work.id, currentChapter.id, paragraphIndex, localCharacterIndex, audioRate);
-      setActiveSpeechPosition({ paragraphIndex, characterIndex: localCharacterIndex });
+            const localEndIndex = boundaryEndOffset === undefined
+        ? undefined
+        : Math.min(
+          boundaryEndOffset - paragraphStarts[segmentParagraphIndex],
+          paragraphs[segmentParagraphIndex].length
+        ) + (segmentParagraphIndex === 0 ? characterOffset : 0);
+      setActiveSpeechPosition({ paragraphIndex, characterIndex: localCharacterIndex, endCharacterIndex: localEndIndex });
       scrollSpeechWordIntoView(paragraphIndex, localCharacterIndex);
       if (speechParagraphRef.current !== paragraphIndex) {
         speechParagraphRef.current = paragraphIndex;
@@ -293,7 +409,7 @@ export const ReaderView: React.FC<ReaderViewProps> = ({
       speechParagraphRef.current = null;
       speechBoundaryHandlerRef.current = null;
       setActiveSpeechPosition(null);
-      setAudioElapsedSeconds(audioDurationSeconds);
+      setAudioElapsedSeconds(audioDurationRef.current);
       setAudioPlaying(false);
       setAudioPaused(false);
     };
@@ -318,53 +434,58 @@ export const ReaderView: React.FC<ReaderViewProps> = ({
         failSpeech(new Error('The Android text-to-speech service is not ready.'));
         return;
       }
-      const chunks = splitNativeSpeechText(text);
+      const chunks = splitNativeSpeechText(
+        text,
+        Capacitor.getPlatform() === 'ios' ? 150 : MAX_NATIVE_SPEECH_CHUNK_LENGTH
+      );
         void listenerReady
-            .then(async () => {
-              const { languages } = await TextToSpeech.getSupportedLanguages();
+          .then(async () => {
 
-              const availableLanguages = languages.filter(
-                (language) => language && language.toLowerCase() !== 'und'
+            const { languages } = await TextToSpeech.getSupportedLanguages();
+
+            const availableLanguages = languages.filter(
+              (language) => language && language.toLowerCase() !== 'und'
+            );
+
+            const declaredLanguage = work.language && !/^(unknown|und|)$/i.test(work.language.trim())
+              ? work.language.trim()
+              : null;
+
+            const detectedLanguage = declaredLanguage ?? detectTextLanguage(text) ?? 'en';
+
+            const language = selectNativeSpeechLanguage(
+              detectedLanguage,
+              availableLanguages
+            ) ?? detectedLanguage;
+
+            if (!language) {
+              throw new Error(
+                `Your phone doesn't have a voice for: ${detectedLanguage} Install one in Settings > Text-to-speech.`
               );
+            }
 
-              const detectedLanguage = detectTextLanguage(text);
+            for (const chunk of chunks) {
+              if (speechId !== speechIdRef.current) return;
 
-              if (!detectedLanguage) {
-                throw new Error(
-                  'Could not identify the text language. Try a longer passage.'
-                );
-              }
-
-              const language = selectNativeSpeechLanguage(
-                detectedLanguage,
-                availableLanguages
+              nativeChunkOffsetRef.current = chunk.start;
+              handleBoundary(
+                chunk.start,
+                Capacitor.getPlatform() === 'ios' ? chunk.start + chunk.text.length : undefined
               );
-
-              if (!language) {
-                throw new Error(
-                  `No installed speech voice is available for: ${detectedLanguage}`
-                );
-              }
-
-              for (const chunk of chunks) {
-                if (speechId !== speechIdRef.current) return;
-
-                nativeChunkOffsetRef.current = chunk.start;
-
-                await TextToSpeech.speak({
-                  text: chunk.text,
-                  lang: language,
-                  rate,
-                  queueStrategy: QueueStrategy.Flush
-                });
-              }
-
-              finishSpeech();
-            })
-            .catch(failSpeech);
-
-          return;
-    }
+              await TextToSpeech.speak({
+                text: chunk.text,
+                lang: language,
+                rate,
+                queueStrategy: QueueStrategy.Flush
+              });
+            }
+            finishSpeech();
+          })
+          .catch((error: unknown) => {
+            failSpeech(error);
+          });
+        return;
+      }
     window.speechSynthesis.cancel();
     const utterance = new SpeechSynthesisUtterance(text);
     utterance.rate = rate;
@@ -375,12 +496,16 @@ export const ReaderView: React.FC<ReaderViewProps> = ({
     };
     utteranceRef.current = utterance;
     window.speechSynthesis.speak(utterance);
-  }, [audioDurationSeconds, audioRate, currentChapter, currentChapterIndex, nativeSpeech, onUpdateProgress, onUpdateTtsPosition, scrollSpeechWordIntoView, speechSupported, work.chapters.length, work.id]);
+  }, [audioRate, currentChapter, currentChapterIndex, nativeSpeech, onUpdateProgress, onUpdateTtsPosition, scrollSpeechWordIntoView, speechSupported, work.chapters.length, work.id, work.language]);
+
+  useEffect(() => {
+    audioDurationRef.current = audioDurationSeconds;
+  }, [audioDurationSeconds]);
 
   useEffect(() => {
     if (!audioPlaying || audioPaused) return;
     const timer = window.setInterval(() => {
-      setAudioElapsedSeconds((elapsed) => Math.min(audioDurationSeconds, elapsed + 1));
+      setAudioElapsedSeconds((elapsed) => Math.min(audioDurationRef.current, elapsed + 1));
     }, 1000);
     return () => window.clearInterval(timer);
   }, [audioDurationSeconds, audioPaused, audioPlaying]);
@@ -692,6 +817,13 @@ export const ReaderView: React.FC<ReaderViewProps> = ({
     OpenDyslexic: 'OpenDyslexic, system-ui, sans-serif'
   }[readerSettings.fontFamily];
 
+  const sourceLabels: Record<string, string> = {
+    'Live AO3': 'AO3',
+    'Local File': 'file',
+  };
+  const sourceName = sourceLabels[work.sourceType] ?? 'original page';
+  const openLabel = `Open this work on ${sourceName}`;
+
   return (
     <div
       ref={readerRef}
@@ -987,64 +1119,28 @@ export const ReaderView: React.FC<ReaderViewProps> = ({
               lineHeight: readerSettings.lineHeight
             }}
           >
-            {currentChapter.content.map((paragraph, idx) => {
-              const wordPattern = /\S+|\s+/g;
-              let match: RegExpExecArray | null;
-              const textParts: React.ReactNode[] = [];
-              while ((match = wordPattern.exec(paragraph)) !== null) {
-                const text = match[0];
-                const start = match.index;
-                const end = start + text.length;
-                if (/^\s+$/.test(text)) {
-                  textParts.push(text);
-                } else {
-                  const isSpeaking = activeSpeechPosition?.paragraphIndex === idx
-                    && activeSpeechPosition.characterIndex >= start
-                    && activeSpeechPosition.characterIndex < end;
-                  const annotation = annotations.find((item) =>
-                    item.workId === work.id
-                    && item.chapterId === currentChapter.id
-                    && item.paragraphIndex === idx
-                    && (item.startOffset ?? -1) < end
-                    && (item.endOffset ?? -1) > start
-                  );
-                  const wordStart = Math.max(start, annotation?.startOffset ?? start);
-                  const wordEnd = Math.min(end, annotation?.endOffset ?? end);
-                  const highlightedText = annotation && wordStart < wordEnd
-                    ? (
-                      <>
-                        {text.slice(0, wordStart - start)}
-                        <mark
-                          className="rounded-sm px-0.5"
-                          style={{ backgroundColor: `var(--highlight-${annotation.highlightColor})`, color: 'inherit' }}
-                        >
-                          {text.slice(wordStart - start, wordEnd - start)}
-                        </mark>
-                        {text.slice(wordEnd - start)}
-                      </>
-                    )
-                    : text;
-                  textParts.push(
-                    <span
-                      key={start}
-                      data-word-start={start}
-                      data-word-end={end}
-                      className={isSpeaking ? 'rounded-sm bg-[var(--accent)] text-[var(--bg-main)] ring-1 ring-[var(--accent)]' : undefined}
-                    >
-                      {highlightedText}
-                    </span>
-                  );
+            {currentChapter.content.map((paragraph, idx) => (
+              <ChapterParagraph
+                key={idx}
+                index={idx}
+                text={paragraph}
+                workId={work.id}
+                chapterId={currentChapter.id}
+                annotations={annotations}
+                speakingCharacterIndex={
+                  activeSpeechPosition?.paragraphIndex === idx
+                    ? activeSpeechPosition.characterIndex
+                    : -1
                 }
-              }
-              return (
-                <p key={idx} data-paragraph-index={idx} className="indent-4 sm:indent-6">
-                  {textParts}
-                </p>
-              );
-            })}
+                speakingEndCharacterIndex={
+                  activeSpeechPosition?.paragraphIndex === idx
+                    ? activeSpeechPosition.endCharacterIndex
+                    : undefined
+                }
+              />
+            ))}
           </div>
-          {audioError && <p role="status" className="text-center text-xs text-rose-400">{audioError}</p>}
-
+        {audioError && !audioControlsOpen && <p role="status" className="text-center text-xs text-rose-400">{audioError}</p>}
           {/* End of Chapter Navigation & AO3 Engagement */}
           <div className="pt-12 mt-12 border-t space-y-8" style={{ borderColor: 'var(--border-color)' }}>
             <div className="flex items-center justify-between">
@@ -1088,52 +1184,19 @@ export const ReaderView: React.FC<ReaderViewProps> = ({
                     ? 'This app does not post comments or kudos. Use the original work page to engage with the author.'
                     : 'The imported file did not contain a verified original work URL.'}
               </p>
-              {!work.isSampleData && work.sourceUrl && (
+              {!work.isSampleData && safeChapterUrl && (
                 <div className="flex flex-wrap items-center justify-center gap-3 pt-2">
-                {(work.sourceType === 'Live AO3' || work.sourceType === 'Local File') && (
-                  <>
-                    <a
-                      href={sourceChapterUrl}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="flex items-center gap-1.5 px-4 py-2 rounded text-xs font-medium border transition-colors hover:opacity-90"
-                      style={{ backgroundColor: 'var(--accent)', color: 'var(--bg-main)', borderColor: 'var(--border-color)' }}
-                    >
-                      <ThumbsUp className="w-3.5 h-3.5" />
-                      {currentChapter.url ? 'Leave Kudos on AO3' : 'Open AO3 Work for Kudos'}
-                    </a>
-                    <a
-                      href={sourceChapterUrl}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="flex items-center gap-1.5 px-4 py-2 rounded text-xs font-medium border transition-colors hover:opacity-80"
-                      style={{ borderColor: 'var(--border-color)' }}
-                    >
-                      <MessageSquare className="w-3.5 h-3.5" />
-                      {currentChapter.url ? 'Comment on AO3' : 'Open AO3 Work for Comments'}
-                    </a>
-                  </>
-                )}
-                <a
-                  href={sourceChapterUrl}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="flex items-center gap-1.5 px-4 py-2 rounded text-xs font-medium border transition-colors hover:opacity-90"
-                  style={{ backgroundColor: 'var(--accent)', color: 'var(--bg-main)', borderColor: 'var(--border-color)' }}
-                >
-                  {currentChapter.url ? 'Open Source Chapter' : 'Open Work Page (chapter link unavailable)'}
-                </a>
-                <a
-                  href={work.sourceUrl}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="flex items-center gap-1.5 px-4 py-2 rounded text-xs font-medium border transition-colors hover:opacity-80"
-                  style={{ borderColor: 'var(--border-color)' }}
-                >
-                  <Globe className="w-3.5 h-3.5" />
-                  Open Source Work
-                </a>
-              </div>
+                  <a
+                    href={safeChapterUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="flex items-center gap-1.5 px-4 py-2 rounded text-xs font-medium border transition-colors hover:opacity-90"
+                    style={{ backgroundColor: 'var(--accent)', color: 'var(--bg-main)', borderColor: 'var(--border-color)' }}
+                  >
+                    <Globe className="w-3.5 h-3.5" />
+                    {openLabel}
+                  </a>
+                </div>
               )}
             </div>
           </div>
