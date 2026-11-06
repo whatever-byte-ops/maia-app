@@ -7,6 +7,10 @@ def releaseSigningProperties = [
     keyPassword: providers.gradleProperty('MAIA_UPLOAD_KEY_PASSWORD').orNull
 ]
 def hasReleaseSigning = releaseSigningProperties.values().every { it?.trim() }
+def requireReleaseSigning = providers.gradleProperty('MAIA_REQUIRE_SIGNING')
+    .map { it.toBoolean() }
+    .orElse(false)
+    .get()
 def configuredVersionCode = providers.gradleProperty('MAIA_VERSION_CODE').orElse('1').get().toInteger()
 def configuredVersionName = providers.gradleProperty('MAIA_VERSION_NAME').orElse('1.0').get()
 
@@ -38,6 +42,9 @@ android {
     }
     buildTypes {
         release {
+            if (requireReleaseSigning && !hasReleaseSigning) {
+                throw new GradleException('Release signing is required. Provide all MAIA_UPLOAD_* properties.')
+            }
             minifyEnabled false
             if (hasReleaseSigning) {
                 signingConfig signingConfigs.release
