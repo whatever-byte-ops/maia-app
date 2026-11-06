@@ -383,7 +383,6 @@ export const ReaderView: React.FC<ReaderViewProps> = ({
         + (segmentParagraphIndex === 0 ? characterOffset : 0);
       nativeResumePositionRef.current = { paragraphIndex, characterIndex: localCharacterIndex };
       speechPositionDirtyRef.current = true;
-      onUpdateTtsPosition(work.id, currentChapter.id, paragraphIndex, localCharacterIndex, audioRate);
             const localEndIndex = boundaryEndOffset === undefined
         ? undefined
         : Math.min(
@@ -394,6 +393,7 @@ export const ReaderView: React.FC<ReaderViewProps> = ({
       scrollSpeechWordIntoView(paragraphIndex, localCharacterIndex);
       if (speechParagraphRef.current !== paragraphIndex) {
         speechParagraphRef.current = paragraphIndex;
+        onUpdateTtsPosition(work.id, currentChapter.id, paragraphIndex, localCharacterIndex, audioRate);
         setCurrentParagraphIndex(paragraphIndex);
         const chapterProgress = currentChapter.content.length > 1
           ? paragraphIndex / (currentChapter.content.length - 1)
