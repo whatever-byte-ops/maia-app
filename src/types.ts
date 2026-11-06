@@ -78,7 +78,7 @@ export interface ReaderSettings {
   lineHeight: number; // e.g. 1.75
   letterSpacing: number; // e.g. 0
   paragraphSpacing: number; // e.g. 16
-  contentWidth: '600px' | '700px' | '800px' | '950px' | '100%;';
+  contentWidth: '600px' | '700px' | '800px' | '950px';
   alignment: 'left' | 'justify';
   readerBackground: 'match-theme' | 'dark' | 'light' | 'sepia' | 'cream' | 'navy';
 }

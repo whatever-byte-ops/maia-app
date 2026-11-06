@@ -37,7 +37,7 @@ function isReaderSettings(value: unknown): value is ReaderSettings {
     && typeof settings.lineHeight === 'number'
     && typeof settings.letterSpacing === 'number'
     && typeof settings.paragraphSpacing === 'number'
-    && ['600px', '700px', '800px', '950px', '100%;'].includes(settings.contentWidth ?? '')
+    && ['600px', '700px', '800px', '950px'].includes(settings.contentWidth ?? '')
     && (settings.alignment === 'left' || settings.alignment === 'justify')
     && ['match-theme', 'dark', 'light', 'sepia', 'cream', 'navy'].includes(settings.readerBackground ?? '');
 }
