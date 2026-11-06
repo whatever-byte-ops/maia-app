@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import type { User } from '@supabase/supabase-js';
 import { Work, Annotation, ThemePreset, ReaderSettings, ReactionType } from './types';
 import { loadAppState, saveAppState } from './services/appStorage';
@@ -89,21 +89,40 @@ export default function App() {
     document.body.dataset.theme = currentTheme;
   }, [currentTheme]);
 
+    // Guarda la biblioteca 800 ms después del último cambio, en lugar de en cada cambio
+  const latestStateRef = useRef({ works, annotations, activeTab, libraryInitialFilter, currentTheme, readerSettings });
+  const saveTimerRef = useRef<number | null>(null);
+
   useEffect(() => {
-    if (typeof window === 'undefined') return;
+    latestStateRef.current = { works, annotations, activeTab, libraryInitialFilter, currentTheme, readerSettings };
     if (storedState.error) return;
-
-    const error = saveAppState({
-      works,
-      annotations,
-      activeTab,
-      libraryInitialFilter,
-      currentTheme,
-      readerSettings
-    }, storedState.legacyStorageKey);
-
-    setStorageError(error);
+    if (saveTimerRef.current !== null) window.clearTimeout(saveTimerRef.current);
+    saveTimerRef.current = window.setTimeout(() => {
+      saveTimerRef.current = null;
+      setStorageError(saveAppState(latestStateRef.current, storedState.legacyStorageKey));
+    }, 800);
   }, [works, annotations, activeTab, libraryInitialFilter, currentTheme, readerSettings, storedState.error]);
+
+  // Guarda de inmediato si la app pasa a segundo plano o se cierra, para no perder cambios pendientes
+  useEffect(() => {
+    const flush = () => {
+      if (storedState.error) return;
+      if (saveTimerRef.current !== null) {
+        window.clearTimeout(saveTimerRef.current);
+        saveTimerRef.current = null;
+      }
+      setStorageError(saveAppState(latestStateRef.current, storedState.legacyStorageKey));
+    };
+    const onVisibility = () => {
+      if (document.visibilityState === 'hidden') flush();
+    };
+    window.addEventListener('pagehide', flush);
+    document.addEventListener('visibilitychange', onVisibility);
+    return () => {
+      window.removeEventListener('pagehide', flush);
+      document.removeEventListener('visibilitychange', onVisibility);
+    };
+  }, [storedState.error, storedState.legacyStorageKey]);
 
   useEffect(() => {
     let active = true;
