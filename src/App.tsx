@@ -348,11 +348,14 @@ export default function App() {
         <ImportPreviewModal
           previewWork={importPreviewWork}
           onClose={() => setImportPreviewWork(null)}
-          onConfirmSave={(work) => {
-            setWorks((prev) => [work, ...prev]);
-            setImportPreviewWork(null);
-            setSelectedWorkForDetail(work);
-          }}
+                    onConfirmSave={(work) => {
+                      const existing = work.sourceUrl
+                        ? works.find((w) => w.sourceUrl === work.sourceUrl)
+                        : undefined;
+                      if (!existing) setWorks((prev) => [work, ...prev]);
+                      setImportPreviewWork(null);
+                      setSelectedWorkForDetail(existing ?? work);
+                    }}
         />
       )}
 
