@@ -148,6 +148,7 @@ export default function App() {
 
   const handleDeleteWork = (workId: string) => {
     setWorks((prev) => prev.filter((w) => w.id !== workId));
+    setAnnotations((prev) => prev.filter((a) => a.workId !== workId));
     setSelectedWorkForDetail(null);
   };
 
